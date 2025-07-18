@@ -1,5 +1,7 @@
 # Posta
 
+Seems to support Manifestv3 now? Not fully tested.
+
 <br /><p align="center"><a href="https://github.com/benso-io/posta" title="Posta"><img height="320" src="./images/benso-posta.png" alt="enso.security - Posta"></a></p>
 
 **Posta** is a tool for researching Cross-document Messaging communication. It allows you to track, explore and exploit `postMessage` vulnerabilities, and includes features such as replaying messages sent between windows within any attached browser.
