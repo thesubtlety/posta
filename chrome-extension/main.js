@@ -1401,12 +1401,17 @@ class Log extends react__WEBPACK_IMPORTED_MODULE_1___default.a.Component {
       log: []
     };
 
-    if (chrome.extension) {
-      chrome.extension.getBackgroundPage().$$$SubScribeToPosta((...args) => {
-        if (args.length) this.log(...args);
-        this.setState({
-          renderId: uuidv4()
-        });
+    if (chrome.runtime) {
+      // Connect to background script
+      this.port = chrome.runtime.connect({ name: "posta-ui" });
+      
+      this.port.onMessage.addListener((msg) => {
+        if (msg.type === "update" && msg.args) {
+          if (msg.args.length) this.log(...msg.args);
+          this.setState({
+            renderId: uuidv4()
+          });
+        }
       });
     }
   }
@@ -1432,6 +1437,12 @@ class Log extends react__WEBPACK_IMPORTED_MODULE_1___default.a.Component {
       stack,
       status
     });
+  }
+
+  componentWillUnmount() {
+    if (this.port) {
+      this.port.disconnect();
+    }
   }
 
   render() {
@@ -32276,7 +32287,7 @@ class window_frame_WindowFrame extends react_default.a.Component {
       received = 0
     } = frame.messages || {};
 
-    let _children = children.list();
+    let _children = children.list ? children.list() : (children.items || []);
 
     let fullyInjected = typeof windowId === "undefined";
     let extUrl = chrome.runtime.getURL("exploit.html");
@@ -32359,6 +32370,14 @@ function uuidv4() {
 class main_App extends react_default.a.Component {
   constructor(...args) {
     super(...args);
+    this.state = {
+      backgroundData: {
+        tabsFrames: [],
+        windowsByTabAndFrameId: {},
+        messagesByMessageId: {}
+      }
+    };
+    this.port = null;
     setInterval(() => this.setState({
       renderId: uuidv4()
     }), 300);
@@ -32455,7 +32474,88 @@ ${beautify(listener, {
   }
 
   get backgroundPage() {
-    return chrome.extension.getBackgroundPage();
+    // Return a mock object that mimics the old background page structure
+    const { backgroundData } = this.state;
+    return {
+      tabsFrames: {
+        list: () => backgroundData.tabsFrames || []
+      },
+      windowsByTabAndFrameId: {
+        get: (id) => {
+          const item = backgroundData.windowsByTabAndFrameId[id];
+          if (!item) {
+            return {
+              get: () => ({}),
+              id: id,
+              attributes: {},
+              children: { items: [], length: 0 },
+              messages: { messages: [], sent: 0, count: 0, received: 0 }
+            };
+          }
+          // Return a mock TabFrame object that has the proper children structure
+          return {
+            get: () => item,
+            id: id,
+            attributes: item.attributes || {},
+            children: item.children || { items: [], length: 0 },
+            messages: item.messages || { messages: [], sent: 0, count: 0, received: 0 }
+          };
+        },
+        _bucket: backgroundData.windowsByTabAndFrameId
+      },
+      messagesByMessageId: {
+        get: (id) => {
+          const item = backgroundData.messagesByMessageId[id];
+          if (!item) {
+            return {
+              get: () => ({ data: null, receiver: null, sender: null, origin: null })
+            };
+          }
+          // If item already has a get method, return it
+          if (typeof item.get === 'function') {
+            return item;
+          }
+          // Otherwise wrap the raw data
+          return {
+            get: () => item
+          };
+        },
+        _bucket: backgroundData.messagesByMessageId
+      }
+    };
+  }
+
+  componentDidMount() {
+    // Establish connection to background script
+    this.port = chrome.runtime.connect({ name: "posta-ui" });
+    
+    this.port.onMessage.addListener((msg) => {
+      if (msg.type === "init" || msg.type === "data") {
+        this.setState({ backgroundData: msg.data });
+      } else if (msg.type === "update") {
+        // Handle updates from background
+        this.forceUpdate();
+      }
+    });
+    
+    // Request initial data
+    this.port.postMessage({ type: "getData" });
+    
+    // Periodically request data updates
+    this.dataInterval = setInterval(() => {
+      if (this.port) {
+        this.port.postMessage({ type: "getData" });
+      }
+    }, 1000);
+  }
+
+  componentWillUnmount() {
+    if (this.port) {
+      this.port.disconnect();
+    }
+    if (this.dataInterval) {
+      clearInterval(this.dataInterval);
+    }
   }
 
   selectFrame(selectedTabFrameId) {
@@ -32525,7 +32625,7 @@ ${beautify(listener, {
   }
 
   sendMessage(targetFrame, data) {
-    if (targetFrame) {
+    if (targetFrame && targetFrame.attributes) {
       const [tabId] = targetFrame.id.split("::");
       chrome.tabs.sendMessage(Number(tabId), {
         dispatchTo: targetFrame.attributes.path,
@@ -32545,7 +32645,7 @@ ${beautify(listener, {
     } = this.state || {};
     const selectedFrame = typeof selectedTabFrameId !== "undefined" ? windowsByTabAndFrameId.get(selectedTabFrameId) : null;
 
-    if (selectedFrame) {
+    if (selectedFrame && selectedFrame.attributes) {
       let data = this.editorSession.getValue();
       const [tabId] = selectedFrame.id.split("::");
       chrome.tabs.sendMessage(Number(tabId), {
@@ -32566,7 +32666,9 @@ ${beautify(listener, {
     } = this.state || {};
     const selectedFrame = typeof selectedTabFrameId !== "undefined" ? windowsByTabAndFrameId.get(selectedTabFrameId) : null;
     const code = this.editorSession ? this.editorSession.getValue() : "";
-    window.open(`${chrome.runtime.getURL("exploit.html")}?target=${main_encode(selectedFrame.attributes.locationHref)}&code=${main_encode(code)}`);
+    if (selectedFrame && selectedFrame.attributes && selectedFrame.attributes.locationHref) {
+      window.open(`${chrome.runtime.getURL("exploit.html")}?target=${main_encode(selectedFrame.attributes.locationHref)}&code=${main_encode(code)}`);
+    }
   }
 
   renderMessageControlPanel() {
@@ -32610,9 +32712,9 @@ ${beautify(listener, {
       className: "key"
     }, "receiver: "), /*#__PURE__*/react_default.a.createElement("div", {
       className: "value"
-    }, receiverWindow.attributes.locationHref)), /*#__PURE__*/react_default.a.createElement("div", {
+    }, receiverWindow && receiverWindow.attributes ? receiverWindow.attributes.locationHref : "unknown")), /*#__PURE__*/react_default.a.createElement("div", {
       className: "action"
-    }, "Resend to ", receiverWindow.attributes.locationHref), /*#__PURE__*/react_default.a.createElement("div", {
+    }, "Resend to ", receiverWindow && receiverWindow.attributes ? receiverWindow.attributes.locationHref : "unknown"), /*#__PURE__*/react_default.a.createElement("div", {
       className: "buttons"
     }, /*#__PURE__*/react_default.a.createElement("div", {
       onClick: () => this.sendMessage(receiverWindow, undefined)

@@ -19,15 +19,26 @@ export default class Log extends React.Component {
         this.state = {
             log: [],
         }
-        if (chrome.extension) {
-            chrome.extension.getBackgroundPage().$$$SubScribeToPosta((...args) => {
-                if (args.length) this.log(...args);
-                this.setState({
-                    renderId: uuidv4()
-                })
+        if (chrome.runtime) {
+            // Connect to background script
+            this.port = chrome.runtime.connect({ name: "posta-ui" });
+            
+            this.port.onMessage.addListener((msg) => {
+                if (msg.type === "update" && msg.args) {
+                    if (msg.args.length) this.log(...msg.args);
+                    this.setState({
+                        renderId: uuidv4()
+                    });
+                }
             });
         }
         
+    }
+
+    componentWillUnmount() {
+        if (this.port) {
+            this.port.disconnect();
+        }
     }
 
     pushLogRecord(record) {

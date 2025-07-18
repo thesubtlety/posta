@@ -16,7 +16,7 @@ export default class WindowFrame extends React.Component {
       const {  children } = frame;
       const {locationHref, listeners=[], windowId} = frame.attributes;
       const {  count= 0, sent=0, received = 0} = frame.messages || {};
-      let _children = children.list();
+      let _children = children.list ? children.list() : (children.items || []);
       let fullyInjected = typeof(windowId)==="undefined";
       let extUrl = chrome.runtime.getURL("exploit.html");
       extUrl = extUrl+`?target=${encode(locationHref)}&code=${encode(code)}`

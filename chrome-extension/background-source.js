@@ -15,30 +15,21 @@ chrome.runtime.onConnect.addListener((port) => {
     if (port.name === "posta-ui") {
         uiPort = port;
         
-        // Make sure data structures are initialized
-        if (!windowsByTabAndFrameId) windowsByTabAndFrameId = new Bucket(TabFrame);
-        if (!messagesByMessageId) messagesByMessageId = new Bucket(Item);
-        if (!messageByTabFrameId) messageByTabFrameId = new Bucket(MessagesBucket);
-        if (!tabsFrames) tabsFrames = new Bucket(TabFrame);
+        // Initialize data structures
+        windowsByTabAndFrameId = new Bucket(TabFrame);
+        messagesByMessageId  = new Bucket(Item);
+        messageByTabFrameId  = new Bucket(MessagesBucket);
+        tabsFrames = new Bucket(TabFrame);
         
-        // Update tabs to get current state
-        updateTabs();
-        
-        // Send initial data after a short delay to allow updateTabs to complete
-        setTimeout(() => {
-            try {
-                port.postMessage({
-                    type: "init",
-                    data: {
-                        tabsFrames: tabsFrames.list(),
-                        windowsByTabAndFrameId: getAllWindowData(),
-                        messagesByMessageId: getAllMessageData()
-                    }
-                });
-            } catch (e) {
-                console.debug("Port disconnected before initial data could be sent");
+        // Send initial data
+        port.postMessage({
+            type: "init",
+            data: {
+                tabsFrames: tabsFrames.list(),
+                windowsByTabAndFrameId: getAllWindowData(),
+                messagesByMessageId: getAllMessageData()
             }
-        }, 100);
+        });
         
         // Handle UI updates
         uiUpdateHandler = (...args) => {
@@ -75,17 +66,7 @@ function getAllWindowData() {
     const result = {};
     if (windowsByTabAndFrameId && windowsByTabAndFrameId._bucket) {
         for (const key in windowsByTabAndFrameId._bucket) {
-            const item = windowsByTabAndFrameId._bucket[key];
-            // Get the data but preserve the TabFrame instance for children
-            const data = item.get();
-            // Convert children to a serializable format
-            if (item.children) {
-                data.children = {
-                    items: item.children.list().map(child => child.get ? child.get() : child),
-                    length: item.children.list().length
-                };
-            }
-            result[key] = data;
+            result[key] = windowsByTabAndFrameId._bucket[key].get();
         }
     }
     return result;
@@ -205,15 +186,10 @@ class TabFrame extends Item {
 
     get () {
         const {children,id} = this;
-        // Avoid infinite recursion - don't call get() on ourselves
-        const baseData = super.get();
         return {
-            ...baseData,
-            children: {
-                items: children.list().map(child => child.get ? child.get() : child),
-                length: children.list().length
-            },
-            messages: this.messages
+            ...super.get(),
+            ...windowsByTabAndFrameId.get(id).get(),
+            children: children.list()
         }
     }
 }
@@ -243,17 +219,18 @@ class MessagesBucket extends Item {
 
     get() {
         return {
-                ...this.messages
+                ...this.messages,
+                messages: this.messages.map(m=>messagesByMessageId.get(m).get())
             }
     }
 }
 
 
-// Initialize buckets at the top level
-windowsByTabAndFrameId = windowsByTabAndFrameId || new Bucket(TabFrame);
-messagesByMessageId = messagesByMessageId || new Bucket(Item);
-messageByTabFrameId = messageByTabFrameId || new Bucket(MessagesBucket);
-tabsFrames = tabsFrames || new Bucket(TabFrame);
+// Initialize buckets if not already initialized
+if (!windowsByTabAndFrameId) windowsByTabAndFrameId = new Bucket(TabFrame);
+if (!messagesByMessageId) messagesByMessageId = new Bucket(Item);
+if (!messageByTabFrameId) messageByTabFrameId = new Bucket(MessagesBucket);
+if (!tabsFrames) tabsFrames = new Bucket(TabFrame);
 
 
 const receivedMessage = ({ messageId, data, origin },tabId, frameId) => {
@@ -356,23 +333,6 @@ const updateTabs = () => {
                     parentWindowFrame.addChild(windowFrame);
                 })
             })
-            
-            // Notify UI if connected
-            if (uiPort) {
-                try {
-                    uiPort.postMessage({
-                        type: "data",
-                        data: {
-                            tabsFrames: tabsFrames.list(),
-                            windowsByTabAndFrameId: getAllWindowData(),
-                            messagesByMessageId: getAllMessageData()
-                        }
-                    });
-                } catch (e) {
-                    console.debug("Port disconnected, cannot send update");
-                    uiPort = null;
-                }
-            }
         })
     })
 }

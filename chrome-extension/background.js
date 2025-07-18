@@ -91,9 +91,106 @@
 
 // let handlers = new Set();
 let uiUpdateHandler;
-chrome.browserAction.onClicked.addListener(() => {
+let windowsByTabAndFrameId;
+let messagesByMessageId;
+let messageByTabFrameId;
+let tabsFrames;
+let uiPort;
+
+chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
+
+// Handle long-lived connections from UI pages
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === "posta-ui") {
+    uiPort = port;
+    
+    // Make sure data structures are initialized
+    if (!windowsByTabAndFrameId) windowsByTabAndFrameId = new Bucket(TabFrame);
+    if (!messagesByMessageId) messagesByMessageId = new Bucket(Item);
+    if (!messageByTabFrameId) messageByTabFrameId = new Bucket(MessagesBucket);
+    if (!tabsFrames) tabsFrames = new Bucket(TabFrame);
+    
+    // Update tabs to get current state
+    updateTabs();
+    
+    // Send initial data after a short delay to allow updateTabs to complete
+    setTimeout(() => {
+      try {
+        port.postMessage({
+          type: "init",
+          data: {
+            tabsFrames: tabsFrames.list(),
+            windowsByTabAndFrameId: getAllWindowData(),
+            messagesByMessageId: getAllMessageData()
+          }
+        });
+      } catch (e) {
+        console.debug("Port disconnected before initial data could be sent");
+      }
+    }, 100);
+    
+    // Handle UI updates
+    uiUpdateHandler = (...args) => {
+      if (uiPort) {
+        uiPort.postMessage({
+          type: "update",
+          args: args
+        });
+      }
+    };
+    
+    port.onMessage.addListener((msg) => {
+      if (msg.type === "getData") {
+        port.postMessage({
+          type: "data",
+          data: {
+            tabsFrames: tabsFrames.list(),
+            windowsByTabAndFrameId: getAllWindowData(),
+            messagesByMessageId: getAllMessageData()
+          }
+        });
+      }
+    });
+    
+    port.onDisconnect.addListener(() => {
+      uiPort = null;
+      uiUpdateHandler = null;
+    });
+  }
+});
+
+// Helper functions to get all data
+function getAllWindowData() {
+  const result = {};
+  if (windowsByTabAndFrameId && windowsByTabAndFrameId._bucket) {
+    for (const key in windowsByTabAndFrameId._bucket) {
+      const item = windowsByTabAndFrameId._bucket[key];
+      // Get the data but preserve the TabFrame instance for children
+      const data = item.get();
+      // Convert children to a serializable format
+      if (item.children) {
+        data.children = {
+          items: item.children.list().map(child => child.get ? child.get() : child),
+          length: item.children.list().length
+        };
+      }
+      result[key] = data;
+    }
+  }
+  return result;
+}
+
+function getAllMessageData() {
+  const result = {};
+  if (messagesByMessageId && messagesByMessageId._bucket) {
+    for (const key in messagesByMessageId._bucket) {
+      result[key] = messagesByMessageId._bucket[key].get();
+    }
+  }
+  return result;
+}
 
 $$$SubScribeToPosta = handler => {
   handler("info", "new subscription from options page");
@@ -216,9 +313,14 @@ class TabFrame extends Item {
       children,
       id
     } = this;
-    return { ...super.get(),
-      ...windowsByTabAndFrameId.get(id).get(),
-      children: children.list()
+    // Avoid infinite recursion - don't call get() on ourselves
+    const baseData = super.get();
+    return { ...baseData,
+      children: {
+        items: children.list().map(child => child.get ? child.get() : child),
+        length: children.list().length
+      },
+      messages: this.messages
     };
   }
 
@@ -247,17 +349,16 @@ class MessagesBucket extends Item {
   }
 
   get() {
-    return { ...this.messages,
-      messages: this.messages.map(m => messagesByMessageId.get(m).get())
-    };
+    return { ...this.messages };
   }
 
 }
 
-windowsByTabAndFrameId = new Bucket(TabFrame);
-messagesByMessageId = new Bucket(Item);
-messageByTabFrameId = new Bucket(MessagesBucket);
-tabsFrames = new Bucket(TabFrame);
+// Initialize buckets at the top level
+windowsByTabAndFrameId = windowsByTabAndFrameId || new Bucket(TabFrame);
+messagesByMessageId = messagesByMessageId || new Bucket(Item);
+messageByTabFrameId = messageByTabFrameId || new Bucket(MessagesBucket);
+tabsFrames = tabsFrames || new Bucket(TabFrame);
 
 const receivedMessage = ({
   messageId,
@@ -266,7 +367,7 @@ const receivedMessage = ({
 }, tabId, frameId) => {
   let tabWindowId = `${tabId}::${frameId}`;
   messageByTabFrameId.add(tabWindowId).addMessage(messageId, "received");
-  uiUpdateHandler("info", `new message from ${origin}`, JSON.stringify(data));
+  if (uiUpdateHandler) uiUpdateHandler("info", `new message from ${origin}`, JSON.stringify(data));
   messagesByMessageId.add(messageId).set("receiver", tabWindowId).set("origin", origin).set("data", data).set("originalType", typeof data);
 };
 
@@ -369,6 +470,23 @@ const updateTabs = () => {
           parentWindowFrame.addChild(windowFrame);
         });
       });
+      
+      // Notify UI if connected
+      if (uiPort) {
+        try {
+          uiPort.postMessage({
+            type: "data",
+            data: {
+              tabsFrames: tabsFrames.list(),
+              windowsByTabAndFrameId: getAllWindowData(),
+              messagesByMessageId: getAllMessageData()
+            }
+          });
+        } catch (e) {
+          console.debug("Port disconnected, cannot send update");
+          uiPort = null;
+        }
+      }
     });
   });
 };

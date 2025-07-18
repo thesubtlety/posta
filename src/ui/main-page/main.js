@@ -24,6 +24,14 @@ function uuidv4(){
 export default class App extends React.Component {
   constructor(...args) {
     super(...args);
+    this.state = {
+      backgroundData: {
+        tabsFrames: [],
+        windowsByTabAndFrameId: {},
+        messagesByMessageId: {}
+      }
+    };
+    this.port = null;
     setInterval(()=>this.setState({renderId: uuidv4()}),300)
   }
 
@@ -103,7 +111,88 @@ ${beautify(listener, {
   }
 
   get backgroundPage() {
-    return chrome.extension.getBackgroundPage();
+    // Return a mock object that mimics the old background page structure
+    const { backgroundData } = this.state;
+    return {
+      tabsFrames: {
+        list: () => backgroundData.tabsFrames || []
+      },
+      windowsByTabAndFrameId: {
+        get: (id) => {
+          const item = backgroundData.windowsByTabAndFrameId[id];
+          if (!item) {
+            return {
+              get: () => ({}),
+              id: id,
+              attributes: {},
+              children: { items: [], length: 0 },
+              messages: { messages: [], sent: 0, count: 0, received: 0 }
+            };
+          }
+          // Return a mock TabFrame object that has the proper children structure
+          return {
+            get: () => item,
+            id: id,
+            attributes: item.attributes || {},
+            children: item.children || { items: [], length: 0 },
+            messages: item.messages || { messages: [], sent: 0, count: 0, received: 0 }
+          };
+        },
+        _bucket: backgroundData.windowsByTabAndFrameId
+      },
+      messagesByMessageId: {
+        get: (id) => {
+          const item = backgroundData.messagesByMessageId[id];
+          if (!item) {
+            return {
+              get: () => ({ data: null, receiver: null, sender: null, origin: null })
+            };
+          }
+          // If item already has a get method, return it
+          if (typeof item.get === 'function') {
+            return item;
+          }
+          // Otherwise wrap the raw data
+          return {
+            get: () => item
+          };
+        },
+        _bucket: backgroundData.messagesByMessageId
+      }
+    };
+  }
+
+  componentDidMount() {
+    // Establish connection to background script
+    this.port = chrome.runtime.connect({ name: "posta-ui" });
+    
+    this.port.onMessage.addListener((msg) => {
+      if (msg.type === "init" || msg.type === "data") {
+        this.setState({ backgroundData: msg.data });
+      } else if (msg.type === "update") {
+        // Handle updates from background
+        this.forceUpdate();
+      }
+    });
+    
+    // Request initial data
+    this.port.postMessage({ type: "getData" });
+    
+    // Periodically request data updates
+    this.dataInterval = setInterval(() => {
+      if (this.port) {
+        this.port.postMessage({ type: "getData" });
+      }
+    }, 1000);
+  }
+
+  componentWillUnmount() {
+    if (this.port) {
+      this.port.disconnect();
+    }
+    if (this.dataInterval) {
+      clearInterval(this.dataInterval);
+    }
   }
 
   selectFrame(selectedTabFrameId) {
@@ -176,7 +265,7 @@ ${beautify(listener, {
   }
 
   sendMessage (targetFrame, data) {
-    if (targetFrame) {
+    if (targetFrame && targetFrame.attributes) {
       const [tabId] = targetFrame.id.split("::");
       chrome.tabs.sendMessage(
         Number(tabId),
@@ -192,7 +281,7 @@ ${beautify(listener, {
     const { windowsByTabAndFrameId } = this.backgroundPage;
     const { selectedTabFrameId } = (this.state || {});
     const selectedFrame = typeof (selectedTabFrameId) !== "undefined" ? windowsByTabAndFrameId.get(selectedTabFrameId) : null;
-    if (selectedFrame) {
+    if (selectedFrame && selectedFrame.attributes) {
       let data = this.editorSession.getValue();
       const [tabId] = selectedFrame.id.split("::");
       chrome.tabs.sendMessage(
@@ -210,7 +299,9 @@ ${beautify(listener, {
     const { selectedTabFrameId } = (this.state || {});
     const selectedFrame = typeof (selectedTabFrameId) !== "undefined" ? windowsByTabAndFrameId.get(selectedTabFrameId) : null;
     const code = this.editorSession ? this.editorSession.getValue() : "";
-    window.open(`${chrome.runtime.getURL("exploit.html")}?target=${encode(selectedFrame.attributes.locationHref)}&code=${encode(code)}`)
+    if (selectedFrame && selectedFrame.attributes && selectedFrame.attributes.locationHref) {
+      window.open(`${chrome.runtime.getURL("exploit.html")}?target=${encode(selectedFrame.attributes.locationHref)}&code=${encode(code)}`)
+    }
   }
 
   renderMessageControlPanel() {
@@ -232,7 +323,7 @@ ${beautify(listener, {
           </div>
           <div className="key-value clickable" onClick={()=>this.selectFrame(receiverWindow.id)}>
             <div className="key">receiver: </div>
-            <div className="value">{receiverWindow.attributes.locationHref}</div>
+            <div className="value">{receiverWindow && receiverWindow.attributes ? receiverWindow.attributes.locationHref : "unknown"}</div>
           </div>
           <div className="action">Resend to {receiverWindow.attributes.locationHref}</div>
           <div className="buttons">
